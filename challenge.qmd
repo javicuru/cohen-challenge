@@ -1,0 +1,84 @@
+---
+title: "Coding challenge"
+author: "Javier Curutchet"
+date: "12/14/2023"
+---
+
+## Análisis de un dataset de tidytuesday usando R y SQL
+
+### Introducción
+Revolviendo entre los datasets de _tidytuesday_ me encontré con uno que registra frases de muchos personajes de la serie _Friends_ y su estado de ánimo al momento de enunciarlas. Ana, mi novia, es fanática de la serie (la vio completa varias veces) y prácticamente me forzó a verla, más o menos hace dos años. Resultándome familiar la serie y las tablas suficientemente simples como para realizar un análisis que sea al mismo tiempo breve pero ilustrativo algunos elementos de SQL y R, opté por este dataset. Pero además, me permite responder una pregunta que me hizo Ana mientras veíamos la serie: "Viste que los personajes de Friends en general están contentos?". No respondí en aquel momento porque yo no puedo ver y hablar al mismo tiempo. Una vez terminado el capítulo ella me repitió la pregunta y entonces pude iluminarla con mi respuesta: "ni idea". Pero ahora, dos años después y cuando el tema carece de toda importancia, algo tengo para decir sobre el asunto. Más aún, aprovechando los datos disponibles, agrego la segunda pregunta que el challenge requiere: Cómo evoluciona el estado de ánimo de los personajes conforme avanza la serie?
+  
+### Dataset
+El dataset se encuentra en el siguiente link:  [friends dataset](https://github.com/rfordatascience/tidytuesday/tree/master/data/2020/2020-09-08) y contiene 3 tablas (de las cuales yo usé solo 2) en archivos csv. La primera tabla que usé, extraída del archivo _friends.csv_ contiene frases transcritas de muchísimos personajes de la serie, con su correspondiente personaje, temporada, episodio, etc. La segunda tabla, extraída del archivo _friends_emotions.csv_ asigna un estado de ánimo a muchas frases (no todas) de las primeras 4 temporadas.
+
+### Estrategia de resolución
+A efectos de ilustrar tanto algunas capacidades de SQL como otras del lenguaje R para buscar respuesta a las preguntas planteadas, opto por extraer y procesar los datos en una base de datos SQL simulada mediante las herramientas que ofrece la librería _DBI_ de R, y luego usar la librería _ggplot2_ para confeccionar una visualización que permita evaluar los datos más claramente.
+
+La idea es poder extraer conclusiones de una visualización que muestre, para cada personaje principal (Chandler, Joey, Monica, Phoebe, Rachel, Ross) cómo fue evolucionando su estado de ánimo conforme la serie fue avanzando. Esto requiere adoptar un criterio que diga cuál fue el estado de ánimo de un personaje en un dado capítulo, lo cual no es obvio pues cada personaje tiene por lo general más de un estado de ánimo en un mismo capítulo. Adopté entonces el siguiente criterio: "el estado de ánimo de un personaje en un dado capítulo es el estado de ánimo más frecuente en dicho capítulo" (es decir, la moda). Este criterio es de alcance limitado, pero tiene dos virtudes: su sencillez que permite por un lado rápidamente continuar con el análisis y por otro lado lo hace fácil de interpretar; y además permite presentar algún recurso de código en SQL para sortear la dificultad de que SQLite no tiene MODE() como _window function_.
+
+### Código
+```{r}
+# Importar librerías
+library(DBI)
+library(tidyverse)
+library(ggplot2)
+
+# Conectar con base de datos
+con <- dbConnect(RSQLite::SQLite(), dbname = ":memory:")
+
+# Volcar archivos csv en tablas SQL
+dbWriteTable(con, "friends", read.csv("friends.csv"))
+dbWriteTable(con, "friends_emotions", read.csv("friends_emotions.csv"))
+
+# Construir query
+query <- 
+  "SELECT speaker, season, episode, emotion
+FROM(
+  SELECT speaker, f.season, f.episode, emotion, COUNT(*) AS emotion_freq
+  FROM friends f
+  INNER JOIN friends_emotions fe
+  ON f.season = fe.season
+  AND f.episode = fe.episode
+  AND f.scene = fe.scene
+  AND f.utterance = fe.utterance
+  WHERE speaker IN ('Chandler Bing', 'Joey Tribbiani', 'Monica Geller', 'Phoebe Buffay', 'Rachel Green', 'Ross Geller')
+  GROUP BY speaker, f.season, f.episode, emotion)
+GROUP BY speaker, season, episode"
+
+# Volcar tabla SQL en un dataframe de R
+df <- dbGetQuery(con, query)
+
+# Eliminar apellidos para no condensar tanto el gráfico
+rep_str <- c('Ross Geller'='Ross',
+  'Rachel Green'='Rachel', 
+  'Phoebe Buffay'='Phoebe', 
+  'Monica Geller'='Monica',
+  'Joey Tribbiani'='Joey',
+  'Chandler Bing'='Chandler')
+
+df$speaker <- str_replace_all(df$speaker, rep_str)
+
+# Mapear los estados de ánimo a colores para visualizarlos
+color_mapping <- c("Joyful"="green", "Neutral"="grey", "Sad"="black", "Mad"="red", "Powerful"="blue", "Peaceful"="yellow")
+
+season_labels <- function(levels) {
+  paste("Temporada", levels)
+}
+
+# Plotear usando ggplot2
+p <- ggplot(df, aes(x = factor(episode), y = factor(speaker), fill = emotion)) +
+  geom_tile(aes(width = 1, height = 0.5)) +
+  scale_fill_manual(values = color_mapping) +
+  labs(x = "Episodio", y = "Personaje", title = "Emoción más frecuente a lo largo de cada temporada") +
+  theme_minimal() +
+  theme(axis.text.y = element_text(size = 8)) +
+  facet_wrap(~ season, ncol = 1, labeller = labeller(season = season_labels))
+
+print(p)
+```
+
+### Conclusiones
+A la pregunta "Viste que los personajes de Friends en general están contentos?" la respuesta es indudablemente "sí", lo cual se manifiesta en la clara supremacía de color verde (asociada al estado _joyful_) en la visualización. Es decir, el estado de ánimo modal de cualquiera de los personajes principales, en función de los datos disponibles, es "alegre".
+
+Con respecto a la segunda pregunta, "Cómo evoluciona el estado de ánimo de los personajes conforme avanza la serie?" hay que ser cautelosos, pues cabe pensar que la evolución del estado de ánimo difícilmente pueda caracterizarse mediante la sola observación de la evolución de su valor modal. Podría refinarse en este punto el criterio de juicio del estado de ánimo por otro que pondere los distintos estados de ánimo que presenta cada personaje a lo largo de un mismo capítulo. No obstante, puedo dar una respuesta en virtud de la información disponible, siempre entendiendo las limitaciones recién planteadas: ningún personaje presenta, en ninguna de las cuatro temporadas, una clara transición de un "buen estado de ánimo" hacia uno "malo" ni viceversa; aunque sí existen en la primera y tercera temporada, momentos en los cuales se aprecia una mayor densidad de enojos (ver la densidad de cuadros rojos a mediados de la primera temporada y en la primera mitad de la tercera).
